@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+REPOSITORY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT
+readonly DEFAULT_THEOS_DIR="$REPOSITORY_ROOT/.build-tools/theos"
+readonly THEOS_INSTALLER_COMMIT="16362d3aa83a0acd56df4493d575d34306d42478"
+
+output_path="$PWD/Unscroll.ipa"
+theos_dir="${UNSCROLL_THEOS:-$DEFAULT_THEOS_DIR}"
+keep_extensions=0
+refresh_tools=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./unscroll-build [options] <Instagram.ipa>
+
+Options:
+  --output PATH            Output path (default: ./Unscroll.ipa)
+  --theos-dir PATH         Use a specific Theos directory
+  --keep-extensions        Keep Instagram app extensions
+  --refresh-tools          Update/reinstall the clone-local Theos toolchain
+  -h, --help               Show this help
+
+The default Theos installation, iOS SDK, toolchain, and build intermediates stay
+inside this repository under .build-tools/ and runtime_fix/.theos/.
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+theos_is_ready() {
+  [[ -x "$theos_dir/toolchain/linux/iphone/bin/clang" ]] &&
+    compgen -G "$theos_dir/sdks/iPhoneOS*.sdk" >/dev/null &&
+    [[ -f "$theos_dir/makefiles/common.mk" ]]
+}
+
+install_theos() {
+  local installer
+
+  mkdir -p "$REPOSITORY_ROOT/.build-tools"
+  installer="$REPOSITORY_ROOT/.build-tools/install-theos"
+
+  printf 'Preparing the iOS build toolchain in %s\n' "$theos_dir"
+  curl \
+    --fail \
+    --location \
+    --retry 3 \
+    --retry-all-errors \
+    --show-error \
+    --silent \
+    --output "$installer" \
+    "https://raw.githubusercontent.com/theos/theos/$THEOS_INSTALLER_COMMIT/bin/install-theos"
+
+  CI=1 THEOS="$theos_dir" bash "$installer"
+  theos_is_ready || die "Theos finished without a usable iOS toolchain and SDK"
+}
+
+while (($#)); do
+  case "$1" in
+    --output)
+      (($# >= 2)) || die "--output requires a path"
+      output_path="$2"
+      shift 2
+      ;;
+    --theos-dir)
+      (($# >= 2)) || die "--theos-dir requires a path"
+      theos_dir="$2"
+      shift 2
+      ;;
+    --keep-extensions)
+      keep_extensions=1
+      shift
+      ;;
+    --refresh-tools)
+      refresh_tools=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+(($# == 1)) || {
+  usage >&2
+  exit 2
+}
+
+source_ipa="$1"
+
+[[ "$(uname -s)" == "Linux" ]] ||
+  die "the one-command builder currently supports Linux build hosts"
+require_command bash
+require_command curl
+require_command git
+require_command make
+require_command python3
+
+[[ -f "$source_ipa" ]] || die "source IPA does not exist: $source_ipa"
+[[ -s "$source_ipa" ]] || die "the source IPA is empty"
+
+if ((refresh_tools)) || ! theos_is_ready; then
+  install_theos
+else
+  printf 'Using Theos toolchain: %s\n' "$theos_dir"
+fi
+
+printf 'Building the iOS runtime fix...\n'
+THEOS="$theos_dir" make \
+  -C "$REPOSITORY_ROOT/runtime_fix" \
+  clean all FINALPACKAGE=1
+
+runtime_fix="$REPOSITORY_ROOT/runtime_fix/.theos/obj/UnscrollRuntimeFix.dylib"
+[[ -f "$runtime_fix" ]] || die "runtime fix build did not produce $runtime_fix"
+
+builder_args=(
+  --runtime-fix "$runtime_fix"
+)
+if ((keep_extensions)); then
+  builder_args+=(--keep-extensions)
+fi
+
+mkdir -p "$(dirname -- "$output_path")"
+printf 'Patching and validating the IPA...\n'
+python3 "$REPOSITORY_ROOT/build_unscroll.py" \
+  "${builder_args[@]}" \
+  "$source_ipa" \
+  "$output_path"
+
+printf '\nBuild complete:\n'
+printf '  IPA: %s\n' "$output_path"

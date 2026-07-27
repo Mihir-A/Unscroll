@@ -1,0 +1,96 @@
+name: Build Unscroll IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: HTTPS direct-download URL for the Instagram IPA
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unscroll-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build draft release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out Unscroll
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Build and validate IPA
+        env:
+          INPUT_IPA_URL: ${{ inputs.ipa_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ipa_url="$INPUT_IPA_URL"
+          if [[ -z "$ipa_url" ]]; then
+            echo "::error::Enter an ipa_url when starting the workflow."
+            exit 1
+          fi
+          if [[ "$ipa_url" != https://* ]]; then
+            echo "::error::The IPA URL must be an HTTPS direct-download URL."
+            exit 1
+          fi
+          echo "::add-mask::$ipa_url"
+
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-all-errors \
+            --show-error \
+            --progress-bar \
+            --output "$RUNNER_TEMP/Instagram.ipa" \
+            "$ipa_url"
+
+          ./unscroll-build \
+            --output "$RUNNER_TEMP/Unscroll.ipa" \
+            "$RUNNER_TEMP/Instagram.ipa"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="unscroll-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Automated Unscroll build from workflow run #${GITHUB_RUN_NUMBER}."
+            echo
+            echo "This draft contains a user-supplied Instagram IPA. Download it,"
+            echo "then delete this draft release. Do not publish it."
+          } > "$notes"
+
+          gh release create "$tag" \
+            "$RUNNER_TEMP/Unscroll.ipa" \
+            --draft \
+            --notes-file "$notes" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Unscroll build #${GITHUB_RUN_NUMBER}"
+
+          release_url="$(
+            gh release view "$tag" \
+              --json url \
+              --jq .url \
+              --repo "$GITHUB_REPOSITORY"
+          )"
+          {
+            echo "### Unscroll draft release created"
+            echo
+            echo "- Output: \`Unscroll.ipa\`"
+            echo "- Draft release: $release_url"
+            echo "- Publish release: **no**"
+          } >> "$GITHUB_STEP_SUMMARY"

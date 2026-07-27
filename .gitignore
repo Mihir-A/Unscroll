@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.build-tools/
+*.ipa
+runtime_fix/.theos/
