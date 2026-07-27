@@ -81,6 +81,35 @@ To patch Reels without injecting the runtime fix, omit `--runtime-fix`:
 python3 build_unscroll.py Instagram.ipa Unscroll.ipa
 ```
 
+## Automated private build
+
+The `Build Unscroll IPA` GitHub Actions workflow performs the complete build on
+a fresh Ubuntu runner:
+
+1. Downloads a named source IPA from a private Nextcloud folder.
+2. Installs Theos and builds `UnscrollRuntimeFix.dylib`.
+3. Patches and validates the IPA.
+4. Uploads the finished IPA and its SHA-256 file to the same private folder.
+5. Deletes the private files from the temporary runner.
+
+The workflow deliberately does not create a GitHub Actions artifact. Artifacts from
+a public repository are available to repository readers and are not an appropriate
+place for an Instagram IPA.
+
+To configure a fork, create a GitHub environment named `private-build` and add these
+environment secrets:
+
+| Secret | Value |
+| --- | --- |
+| `NEXTCLOUD_BASE_URL` | Nextcloud URL, without a trailing slash |
+| `NEXTCLOUD_USERNAME` | Nextcloud account name |
+| `NEXTCLOUD_APP_PASSWORD` | A dedicated, revocable app password |
+| `NEXTCLOUD_FOLDER` | Private folder containing the source IPA |
+
+Then open **Actions → Build Unscroll IPA → Run workflow** and enter the source IPA's
+filename. The output filename is optional; when omitted, the workflow uses the
+GitHub run number so it does not overwrite an earlier build.
+
 ## Install
 
 Sign and install `Unscroll.ipa` with your preferred iOS sideloading tool. For

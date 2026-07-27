@@ -1,0 +1,233 @@
+name: Build Unscroll IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ipa:
+        description: IPA filename in the configured private storage folder
+        required: true
+        type: string
+      output_ipa:
+        description: Output filename (defaults to Unscroll-<run number>.ipa)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unscroll-private-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Patch private IPA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: private-build
+    env:
+      NEXTCLOUD_BASE_URL: ${{ secrets.NEXTCLOUD_BASE_URL }}
+      NEXTCLOUD_USERNAME: ${{ secrets.NEXTCLOUD_USERNAME }}
+      NEXTCLOUD_APP_PASSWORD: ${{ secrets.NEXTCLOUD_APP_PASSWORD }}
+      NEXTCLOUD_FOLDER: ${{ secrets.NEXTCLOUD_FOLDER }}
+
+    steps:
+      - name: Check out Unscroll
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Validate private build configuration
+        env:
+          SOURCE_NAME: ${{ inputs.source_ipa }}
+          REQUESTED_OUTPUT_NAME: ${{ inputs.output_ipa }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for variable in \
+            NEXTCLOUD_BASE_URL \
+            NEXTCLOUD_USERNAME \
+            NEXTCLOUD_APP_PASSWORD \
+            NEXTCLOUD_FOLDER
+          do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::The private-build environment is missing $variable."
+              exit 1
+            fi
+          done
+
+          filename_pattern='^[A-Za-z0-9][A-Za-z0-9._-]*\.ipa$'
+          if [[ ! "$SOURCE_NAME" =~ $filename_pattern ]]; then
+            echo "::error::source_ipa must be a plain .ipa filename."
+            exit 1
+          fi
+
+          output_name="$REQUESTED_OUTPUT_NAME"
+          if [[ -z "$output_name" ]]; then
+            output_name="Unscroll-${GITHUB_RUN_NUMBER}.ipa"
+          fi
+          if [[ ! "$output_name" =~ $filename_pattern ]]; then
+            echo "::error::output_ipa must be a plain .ipa filename."
+            exit 1
+          fi
+          if [[ "$output_name" == "$SOURCE_NAME" ]]; then
+            echo "::error::The source and output filenames must differ."
+            exit 1
+          fi
+
+          {
+            echo "UNSCROLL_SOURCE_NAME=$SOURCE_NAME"
+            echo "UNSCROLL_OUTPUT_NAME=$output_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Download source IPA from private storage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_url="$(
+            python3 - <<'PY'
+          import os
+          from urllib.parse import quote
+
+          def encode_path(value: str) -> str:
+              return "/".join(quote(part, safe="") for part in value.strip("/").split("/"))
+
+          base = os.environ["NEXTCLOUD_BASE_URL"].rstrip("/")
+          user = quote(os.environ["NEXTCLOUD_USERNAME"], safe="")
+          folder = encode_path(os.environ["NEXTCLOUD_FOLDER"])
+          filename = quote(os.environ["UNSCROLL_SOURCE_NAME"], safe="")
+          print(f"{base}/remote.php/dav/files/{user}/{folder}/{filename}")
+          PY
+          )"
+
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-all-errors \
+            --show-error \
+            --silent \
+            --user "$NEXTCLOUD_USERNAME:$NEXTCLOUD_APP_PASSWORD" \
+            --output "$RUNNER_TEMP/Instagram.ipa" \
+            "$source_url"
+
+          if [[ ! -s "$RUNNER_TEMP/Instagram.ipa" ]]; then
+            echo "::error::Private storage returned an empty source IPA."
+            exit 1
+          fi
+
+      - name: Install Theos
+        env:
+          CI: "1"
+          THEOS: ${{ runner.temp }}/theos
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://raw.githubusercontent.com/theos/theos/16362d3aa83a0acd56df4493d575d34306d42478/bin/install-theos \
+            | bash
+
+      - name: Build runtime fix
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C runtime_fix clean all FINALPACKAGE=1
+
+      - name: Build and validate Unscroll
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 build_unscroll.py \
+            --runtime-fix runtime_fix/.theos/obj/UnscrollRuntimeFix.dylib \
+            "$RUNNER_TEMP/Instagram.ipa" \
+            "$RUNNER_TEMP/Unscroll.ipa"
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          ipa = Path(os.environ["RUNNER_TEMP"]) / "Unscroll.ipa"
+          runtime_fix = (
+              "Payload/Instagram.app/Frameworks/UnscrollRuntimeFix.dylib"
+          )
+          extension_prefixes = (
+              "Payload/Instagram.app/Extensions/",
+              "Payload/Instagram.app/PlugIns/",
+          )
+
+          with ZipFile(ipa) as archive:
+              bad_entry = archive.testzip()
+              if bad_entry is not None:
+                  raise SystemExit(f"CRC validation failed at {bad_entry}")
+              names = archive.namelist()
+              if runtime_fix not in names:
+                  raise SystemExit("runtime fix is missing from the output IPA")
+              if any(name.startswith(extension_prefixes) for name in names):
+                  raise SystemExit("an app extension remains in the output IPA")
+          PY
+
+      - name: Upload output to private storage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output_url="$(
+            python3 - <<'PY'
+          import os
+          from urllib.parse import quote
+
+          def encode_path(value: str) -> str:
+              return "/".join(quote(part, safe="") for part in value.strip("/").split("/"))
+
+          base = os.environ["NEXTCLOUD_BASE_URL"].rstrip("/")
+          user = quote(os.environ["NEXTCLOUD_USERNAME"], safe="")
+          folder = encode_path(os.environ["NEXTCLOUD_FOLDER"])
+          filename = quote(os.environ["UNSCROLL_OUTPUT_NAME"], safe="")
+          print(f"{base}/remote.php/dav/files/{user}/{folder}/{filename}")
+          PY
+          )"
+
+          digest="$(sha256sum "$RUNNER_TEMP/Unscroll.ipa" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$digest" "$UNSCROLL_OUTPUT_NAME" \
+            > "$RUNNER_TEMP/Unscroll.ipa.sha256"
+
+          curl \
+            --fail \
+            --retry 3 \
+            --retry-all-errors \
+            --show-error \
+            --silent \
+            --user "$NEXTCLOUD_USERNAME:$NEXTCLOUD_APP_PASSWORD" \
+            --upload-file "$RUNNER_TEMP/Unscroll.ipa" \
+            "$output_url"
+
+          curl \
+            --fail \
+            --retry 3 \
+            --retry-all-errors \
+            --show-error \
+            --silent \
+            --user "$NEXTCLOUD_USERNAME:$NEXTCLOUD_APP_PASSWORD" \
+            --upload-file "$RUNNER_TEMP/Unscroll.ipa.sha256" \
+            "${output_url}.sha256"
+
+          {
+            echo "### Unscroll build complete"
+            echo
+            echo "- Output: \`$UNSCROLL_OUTPUT_NAME\`"
+            echo "- SHA-256: \`$digest\`"
+            echo "- Destination: configured private storage"
+            echo "- GitHub artifact created: no"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove private build files
+        if: always()
+        shell: bash
+        run: |
+          find "$RUNNER_TEMP" -maxdepth 1 -type f \
+            \( -name 'Instagram.ipa' -o -name 'Unscroll.ipa*' \) \
+            -delete
