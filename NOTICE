@@ -1,0 +1,10 @@
+Unscroll
+Copyright 2026 Mihir-A
+
+This product includes software and route research derived from HealthyIG:
+https://github.com/AlessandroBonomo28/HealthyIG
+
+The runtime compatibility component is based on IGSideloadFix:
+Copyright (c) 2022 Lars Fröder
+https://github.com/opa334/IGSideloadFix
+Its MIT license is included in runtime_fix/LICENSE.
