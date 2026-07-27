@@ -36,7 +36,7 @@ signed app on its available keychain and app-group containers so a force quit do
 not discard the login session, and it prevents the sideloaded app from being
 mistaken for an expired TestFlight beta.
 
-## Build with GitHub Actions
+## Recomended: Build with GitHub Actions
 
 1. Fork Unscroll on GitHub.
 2. Host your decrypted Instagram IPA at an HTTPS direct-download URL.
@@ -45,7 +45,7 @@ mistaken for an expired TestFlight beta.
 
 The workflow builds `Unscroll.ipa` and creates a draft release.
 
-## Quick start: build locally
+## Build locally
 
 You need:
 
@@ -58,6 +58,7 @@ Clone your fork, then run the one-command builder:
 ```bash
 git clone https://github.com/YOUR-USERNAME/Unscroll.git
 cd Unscroll
+chmod +x ./unscroll-build
 ./unscroll-build /path/to/Instagram.ipa
 ```
 
