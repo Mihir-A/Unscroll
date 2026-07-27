@@ -56,7 +56,7 @@ You need:
 Clone your fork, then run the one-command builder:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/Unscroll.git
+git clone https://github.com/Mihir-A/Unscroll.git
 cd Unscroll
 chmod +x ./unscroll-build
 ./unscroll-build /path/to/Instagram.ipa
