@@ -35,6 +35,10 @@ jobs:
       - name: Check out Unscroll
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
+      - name: Test route policy
+        shell: bash
+        run: python3 -m unittest discover -v
+
       - name: Validate private build configuration
         env:
           SOURCE_NAME: ${{ inputs.source_ipa }}

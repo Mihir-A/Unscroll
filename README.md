@@ -21,6 +21,9 @@ and chaining while leaving the rest of Instagram intact.
 The Reels button may remain visible because Unscroll changes requests, not Instagram's
 interface. Opening it should not produce a working algorithmic feed.
 
+Instagram internally uses the older “reels media” name for Story endpoints. Unscroll
+deliberately preserves those routes so viewing and posting Stories continues to work.
+
 Unscroll also includes an optional sideload runtime fix. It keeps the signed app on
 its available keychain and app-group containers so a force quit does not discard the
 login session, and it prevents the sideloaded build from being mistaken for an

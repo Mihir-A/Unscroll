@@ -27,8 +27,15 @@ UNSCROLL_ROUTES = (
     b"/discover/interest_grid/clips/",
     b"/feed/injected_reels_media/",
     b"/feed/injected_reels_media_www/",
+)
+
+# Instagram's internal "reels media" naming predates the Reels product and is
+# also used for Stories. These routes must remain available.
+PRESERVED_ROUTES = (
+    b"/discover/topical_explore/",
     b"/feed/reels_media/",
     b"/feed/reels_media_stream/",
+    b"/feed/timeline",
 )
 
 EXECUTABLE = "Payload/Instagram.app/Instagram"
