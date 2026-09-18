@@ -10,7 +10,7 @@ chaining without intercepting or changing Instagram's network requests.
 
 | Instagram version | Status | Date |
 | --- | --- | --- |
-| `447.0.0` | ⚠️ Build verified | September 17, 2026 |
+| `447.0.0` | ✅ Working | September 17, 2026 |
 
 ## What stays and what goes
 
@@ -36,20 +36,40 @@ The same small runtime library keeps the signed app on its available keychain an
 app-group containers so a force quit does not discard the login session. It also
 prevents the sideloaded app from being mistaken for an expired TestFlight beta.
 
-## Recommended: Build with GitHub Actions
+## Recommended Quick Start
 
-1. Fork Unscroll on GitHub.
-2. Host your decrypted Instagram IPA at an HTTPS direct-download URL.
-3. Open **Actions → Build Unscroll IPA → Run workflow** in your fork.
-4. Enter the URL in `ipa_url` and run the workflow.
+1. Fork this repository and enable Actions if prompted.
+2. Download a decrypted Instagram IPA.
+3. Upload the IPA to [Dropbox](https://www.dropbox.com/),
+   choose **Share → Copy link**, and change the final `dl=0` to `dl=1`.
+4. Verify that the link downloads the IPA in a private browser window without a
+   login. Any HTTPS host works if it returns the file rather than a preview page.
+5. In your fork, open **Actions → Build Unscroll IPA → Run workflow**, paste the
+   link into `ipa_url`, and start the build.
+6. Open the completed run's summary, follow its **Draft release** link, and
+   download `Unscroll.ipa`.
 
-The workflow builds `Unscroll.ipa` and creates a draft release.
+Delete the draft release and hosted source IPA afterward; do not publish either
+IPA.
+
+### Install with SideStore
+
+After [setting up SideStore](https://docs.sidestore.io/docs/installation/install):
+
+1. Save `Unscroll.ipa` to Files on your iPhone.
+2. Connect to Wi-Fi and LocalDevVPN, then open **SideStore → My Apps → `+`** and
+   select the IPA.
+3. Choose **Keep App Extensions (Use Main Profile)** when prompted.
+
+Keep Wi-Fi and LocalDevVPN enabled during installs and refreshes. Free profiles
+must be refreshed before the seven-day timer expires. Install future builds over
+the existing app to preserve its data.
 
 ## Build locally
 
 You need:
 
-- A Linux computer with internet access and Python 3.10 or newer
+- Linux with Python 3.10 or newer
 - A lawfully obtained, decrypted ARM64 Instagram IPA
 - An iPhone running iOS 16.3 or newer
 
@@ -74,6 +94,8 @@ with:
 ./unscroll-build --output /path/to/Unscroll.ipa /path/to/Instagram.ipa
 ```
 
+Install the result using the SideStore steps above.
+
 Run `./unscroll-build --help` for advanced options, including using an existing
 Theos installation.
 
@@ -93,16 +115,6 @@ The builder:
 
 The client hooks target Instagram `447.0.0`. Instagram can rename its internal
 classes at any time, so other versions may need updated hook names.
-
-## Install
-
-Sign and install `Unscroll.ipa` with your preferred iOS sideloading tool. For
-[SideStore](https://sidestore.io/), open Apps, choose the `+` button, and select the
-resulting IPA. When prompted, select **Keep App Extensions (Use Main Profile)**.
-A free Apple signing profile still needs to be refreshed on its normal schedule.
-
-When replacing an existing signed installation, use the same bundle identifier and
-signing identity if you want the sideloading tool to preserve its data container.
 
 ## Closest drop-in setup
 
