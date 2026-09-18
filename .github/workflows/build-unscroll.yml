@@ -71,6 +71,8 @@ jobs:
           {
             echo "Automated Unscroll build from workflow run #${GITHUB_RUN_NUMBER}."
             echo
+            echo "For SideStore, choose Keep App Extensions (Use Main Profile)."
+            echo
             echo "This draft contains a user-supplied Instagram IPA. Download it,"
             echo "then delete this draft release. Do not publish it."
           } > "$notes"

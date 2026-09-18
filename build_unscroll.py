@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import plistlib
 import shutil
 import struct
 import tempfile
@@ -12,13 +13,25 @@ from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
 
 
 EXECUTABLE = "Payload/Instagram.app/Instagram"
+INFO_PLIST = "Payload/Instagram.app/Info.plist"
 RUNTIME_FIX_NAME = "UnscrollRuntimeFix.dylib"
 RUNTIME_FIX_ARCHIVE_PATH = f"Payload/Instagram.app/Frameworks/{RUNTIME_FIX_NAME}"
 RUNTIME_FIX_INSTALL_NAME = f"@executable_path/Frameworks/{RUNTIME_FIX_NAME}"
+EXTENSION_RUNTIME_FIX_INSTALL_NAME = (
+    f"@executable_path/../../Frameworks/{RUNTIME_FIX_NAME}"
+)
 EXTENSION_PREFIXES = (
     "Payload/Instagram.app/Extensions/",
     "Payload/Instagram.app/PlugIns/",
 )
+UNSUPPORTED_EXTENSION_POINTS = {
+    "com.apple.usernotifications.content-extension",
+    "com.apple.usernotifications.service",
+}
+UNSUPPORTED_EXTENSION_BUNDLE_IDS = {
+    "com.burbn.instagram.lockscreencamera",
+}
+UNSCROLL_URL_SCHEME = "unscroll"
 LC_LOAD_DYLIB = 0xC
 LC_SEGMENT_64 = 0x19
 LC_ENCRYPTION_INFO = 0x21
@@ -36,11 +49,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="inject UnscrollRuntimeFix.dylib for sideload compatibility",
-    )
-    parser.add_argument(
-        "--keep-extensions",
-        action="store_true",
-        help="retain app extensions (not recommended for SideStore)",
     )
     return parser.parse_args()
 
@@ -176,10 +184,68 @@ def add_runtime_fix(target: ZipFile, dylib_path: Path) -> None:
         shutil.copyfileobj(reader, writer)
 
 
+def extension_bundles(source: ZipFile) -> list[dict[str, str]]:
+    bundles = []
+    for name in source.namelist():
+        if not name.endswith(".appex/Info.plist"):
+            continue
+        if not name.startswith(EXTENSION_PREFIXES):
+            continue
+
+        try:
+            info = plistlib.loads(source.read(name))
+        except plistlib.InvalidFileException as error:
+            raise ValueError(f"invalid extension Info.plist: {name}") from error
+
+        executable = info.get("CFBundleExecutable")
+        if not isinstance(executable, str) or not executable:
+            raise ValueError(f"extension has no executable: {name}")
+        root = name.removesuffix("Info.plist")
+        bundles.append(
+            {
+                "root": root,
+                "bundle_id": info.get("CFBundleIdentifier", ""),
+                "executable": root + executable,
+                "point": info.get("NSExtension", {}).get(
+                    "NSExtensionPointIdentifier", ""
+                ),
+            }
+        )
+    return bundles
+
+
+def add_unscroll_url_scheme(raw_plist: bytes) -> bytes:
+    try:
+        info = plistlib.loads(raw_plist)
+    except plistlib.InvalidFileException as error:
+        raise ValueError("invalid Instagram Info.plist") from error
+
+    url_types = info.setdefault("CFBundleURLTypes", [])
+    if not isinstance(url_types, list):
+        raise ValueError("Instagram CFBundleURLTypes is not an array")
+    has_scheme = any(
+        UNSCROLL_URL_SCHEME in url_type.get("CFBundleURLSchemes", [])
+        for url_type in url_types
+        if isinstance(url_type, dict)
+    )
+    if not has_scheme:
+        url_types.append(
+            {
+                "CFBundleTypeRole": "Viewer",
+                "CFBundleURLName": "Unscroll Link",
+                "CFBundleURLSchemes": [UNSCROLL_URL_SCHEME],
+            }
+        )
+
+    plist_format = (
+        plistlib.FMT_BINARY if raw_plist.startswith(b"bplist") else plistlib.FMT_XML
+    )
+    return plistlib.dumps(info, fmt=plist_format, sort_keys=False)
+
+
 def build_ipa(
     source_path: Path,
     output_path: Path,
-    keep_extensions: bool,
     runtime_fix: Path,
 ) -> None:
     source_path = source_path.resolve()
@@ -196,25 +262,68 @@ def build_ipa(
         temporary = Path(temporary_dir)
         binary_path = temporary / "Instagram"
         staged_output = temporary / output_path.name
+        patched_extensions: dict[str, Path] = {}
 
         try:
             with ZipFile(source_path, "r") as source:
                 names = set(source.namelist())
                 if EXECUTABLE not in names:
                     raise ValueError(f"IPA does not contain {EXECUTABLE}")
+                if INFO_PLIST not in names:
+                    raise ValueError(f"IPA does not contain {INFO_PLIST}")
                 with source.open(EXECUTABLE) as reader, binary_path.open("wb") as writer:
                     shutil.copyfileobj(reader, writer, length=1024 * 1024)
 
                 validate_binary(binary_path)
                 inject_dylib(binary_path, RUNTIME_FIX_INSTALL_NAME)
 
+                bundles = extension_bundles(source)
+                removed_roots = {
+                    bundle["root"]
+                    for bundle in bundles
+                    if bundle["point"] in UNSUPPORTED_EXTENSION_POINTS
+                    or bundle["bundle_id"] in UNSUPPORTED_EXTENSION_BUNDLE_IDS
+                }
+                kept_bundles = [
+                    bundle for bundle in bundles if bundle["root"] not in removed_roots
+                ]
+                empty_extension_directories = {
+                    prefix
+                    for prefix in EXTENSION_PREFIXES
+                    if not any(
+                        bundle["root"].startswith(prefix) for bundle in kept_bundles
+                    )
+                }
+                for index, bundle in enumerate(kept_bundles):
+                    executable = bundle["executable"]
+                    if executable not in names:
+                        raise ValueError(
+                            f"extension executable is missing from IPA: {executable}"
+                        )
+                    staged_binary = temporary / f"extension-{index}"
+                    with source.open(executable) as reader, staged_binary.open(
+                        "wb"
+                    ) as writer:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    validate_binary(staged_binary)
+                    inject_dylib(
+                        staged_binary,
+                        EXTENSION_RUNTIME_FIX_INSTALL_NAME,
+                    )
+                    patched_extensions[executable] = staged_binary
+
+                patched_info_plist = add_unscroll_url_scheme(source.read(INFO_PLIST))
+
                 removed_entries = 0
                 with ZipFile(staged_output, "w", allowZip64=True) as target:
                     for info in source.infolist():
                         if info.filename == RUNTIME_FIX_ARCHIVE_PATH:
                             continue
-                        if not keep_extensions and info.filename.startswith(
-                            EXTENSION_PREFIXES
+                        if info.filename in empty_extension_directories:
+                            removed_entries += 1
+                            continue
+                        if any(
+                            info.filename.startswith(root) for root in removed_roots
                         ):
                             removed_entries += 1
                             continue
@@ -223,6 +332,16 @@ def build_ipa(
                                 info, "w"
                             ) as writer:
                                 shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                        elif info.filename == INFO_PLIST:
+                            target.writestr(info, patched_info_plist)
+                        elif info.filename in patched_extensions:
+                            with (
+                                patched_extensions[info.filename].open("rb") as reader,
+                                target.open(info, "w") as writer,
+                            ):
+                                shutil.copyfileobj(
+                                    reader, writer, length=1024 * 1024
+                                )
                         else:
                             copy_zip_entry(source, target, info)
                     add_runtime_fix(target, runtime_fix)
@@ -233,19 +352,27 @@ def build_ipa(
             bad_entry = verification.testzip()
             if bad_entry:
                 raise ValueError(f"rebuilt IPA failed CRC validation at {bad_entry}")
-            if not keep_extensions and any(
-                name.startswith(EXTENSION_PREFIXES)
-                for name in verification.namelist()
+            output_names = set(verification.namelist())
+            if any(
+                name.startswith(root)
+                for root in removed_roots
+                for name in output_names
             ):
-                raise ValueError("an app extension remains in the rebuilt IPA")
+                raise ValueError("an unsupported app extension remains")
+            if not set(patched_extensions).issubset(output_names):
+                raise ValueError("a retained app extension is missing")
             if RUNTIME_FIX_ARCHIVE_PATH not in verification.namelist():
                 raise ValueError("runtime fix is missing from the rebuilt IPA")
 
         staged_output.replace(output_path)
 
-    if not keep_extensions:
-        print(f"Removed extension entries: {removed_entries}")
-    print(f"Injected client-side Reels limiter: {RUNTIME_FIX_NAME}")
+    print(f"Retained SideStore-compatible app extensions: {len(patched_extensions)}")
+    print(f"Removed unsupported extension entries: {removed_entries}")
+    print(
+        "Injected Reels limiter and sideload compatibility into "
+        f"the app and {len(patched_extensions)} extensions: {RUNTIME_FIX_NAME}"
+    )
+    print(f"Registered link scheme: {UNSCROLL_URL_SCHEME}://")
     print(f"Created: {output_path}")
 
 
@@ -255,7 +382,6 @@ def main() -> None:
         build_ipa(
             args.input,
             args.output,
-            args.keep_extensions,
             args.runtime_fix,
         )
     except (OSError, ValueError) as error:

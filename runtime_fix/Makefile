@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 LIBRARY_NAME = UnscrollRuntimeFix
 
 UnscrollRuntimeFix_FILES = UnscrollRuntimeFix.m
-UnscrollRuntimeFix_FRAMEWORKS = Foundation Security
+UnscrollRuntimeFix_FRAMEWORKS = Foundation Security UIKit
 UnscrollRuntimeFix_CFLAGS = -fobjc-arc
 UnscrollRuntimeFix_INSTALL_PATH = @executable_path/Frameworks
 

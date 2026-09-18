@@ -7,13 +7,18 @@
 
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
+#import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 static NSString *UnscrollKeychainAccessGroup;
+static NSString *UnscrollTeamIdentifier;
 static NSURL *UnscrollFakeGroupContainerURL;
 static NSURL *(*UnscrollOriginalAppStoreReceiptURL)(id, SEL);
+static NSURL *(*UnscrollOriginalGroupContainer)(id, SEL, NSString *);
 static id (*UnscrollOriginalReelsObjects)(id, SEL, id);
 static id (*UnscrollOriginalHomeFeedObjects)(id, SEL, id);
+static BOOL (*UnscrollOriginalOpenURL)(id, SEL, UIApplication *, NSURL *, NSDictionary *);
 static char UnscrollFirstReelKey;
 
 static id UnscrollLimitReelsObjects(id self, SEL selector, id adapter)
@@ -64,10 +69,33 @@ static void UnscrollCreateDirectory(NSURL *url)
 }
 
 static NSURL *UnscrollGroupContainer(
-    __unused NSFileManager *self,
-    __unused SEL selector,
+    NSFileManager *self,
+    SEL selector,
     NSString *groupIdentifier)
 {
+    if (groupIdentifier.length == 0) {
+        return nil;
+    }
+
+    if (UnscrollOriginalGroupContainer != NULL) {
+        NSURL *url = UnscrollOriginalGroupContainer(
+            self, selector, groupIdentifier);
+        if (url != nil) {
+            return url;
+        }
+
+        if (UnscrollTeamIdentifier.length > 0
+            && ![groupIdentifier hasSuffix:UnscrollTeamIdentifier]) {
+            NSString *signedIdentifier = [groupIdentifier
+                stringByAppendingFormat:@".%@", UnscrollTeamIdentifier];
+            url = UnscrollOriginalGroupContainer(
+                self, selector, signedIdentifier);
+            if (url != nil) {
+                return url;
+            }
+        }
+    }
+
     NSURL *url = [UnscrollFakeGroupContainerURL
         URLByAppendingPathComponent:groupIdentifier
         isDirectory:YES];
@@ -77,6 +105,78 @@ static NSURL *UnscrollGroupContainer(
     UnscrollCreateDirectory([url URLByAppendingPathComponent:@"Library/Caches"
                                                   isDirectory:YES]);
     return url;
+}
+
+static BOOL UnscrollIsExtensionProcess(void)
+{
+    return [[NSBundle mainBundle].bundlePath.pathExtension
+        isEqualToString:@"appex"];
+}
+
+static NSURL *UnscrollWrappedInstagramURL(NSURL *url)
+{
+    if (![url.scheme.lowercaseString isEqualToString:@"unscroll"]
+        || ![url.host.lowercaseString isEqualToString:@"open"]) {
+        return nil;
+    }
+
+    NSURLComponents *components = [NSURLComponents
+        componentsWithURL:url
+        resolvingAgainstBaseURL:NO];
+    NSString *wrappedURLString = nil;
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:@"url"]) {
+            wrappedURLString = item.value;
+            break;
+        }
+    }
+    if (wrappedURLString.length == 0) {
+        return nil;
+    }
+    NSURL *wrappedURL = [NSURL URLWithString:wrappedURLString];
+    NSString *scheme = wrappedURL.scheme.lowercaseString;
+    NSString *host = wrappedURL.host.lowercaseString;
+    BOOL validHost = [host isEqualToString:@"instagram.com"]
+        || [host hasSuffix:@".instagram.com"]
+        || [host isEqualToString:@"instagr.am"]
+        || [host hasSuffix:@".instagr.am"];
+    if (![scheme isEqualToString:@"https"] || !validHost) {
+        return nil;
+    }
+    return wrappedURL;
+}
+
+static BOOL UnscrollOpenURL(
+    id self,
+    SEL selector,
+    UIApplication *application,
+    NSURL *url,
+    NSDictionary *options)
+{
+    NSURL *wrappedURL = UnscrollWrappedInstagramURL(url);
+    if (wrappedURL != nil) {
+        SEL continueSelector =
+            @selector(application:continueUserActivity:restorationHandler:);
+        id activityHandler = [self respondsToSelector:continueSelector]
+            ? self
+            : application.delegate;
+        if ([activityHandler respondsToSelector:continueSelector]) {
+            NSUserActivity *activity = [[NSUserActivity alloc]
+                initWithActivityType:NSUserActivityTypeBrowsingWeb];
+            activity.webpageURL = wrappedURL;
+            return ((BOOL (*)(id, SEL, UIApplication *, NSUserActivity *, id))
+                objc_msgSend)(activityHandler,
+                              continueSelector,
+                              application,
+                              activity,
+                              ^(__unused NSArray *restorableObjects) {});
+        }
+        url = wrappedURL;
+    }
+
+    return UnscrollOriginalOpenURL == NULL
+        ? NO
+        : UnscrollOriginalOpenURL(self, selector, application, url, options);
 }
 
 static NSString *UnscrollAccessGroup(__unused id self, __unused SEL selector)
@@ -159,6 +259,9 @@ static void UnscrollInitializeRuntimeFix(void)
 
         UnscrollKeychainAccessGroup = UnscrollLoadKeychainAccessGroup();
         if (UnscrollKeychainAccessGroup != nil) {
+            UnscrollTeamIdentifier =
+                [UnscrollKeychainAccessGroup componentsSeparatedByString:@"."]
+                    .firstObject;
             SEL accessGroupSelector = @selector(accessGroup);
             UnscrollReplaceMethod(
                 objc_getClass("FBSDKKeychainStore"),
@@ -174,10 +277,15 @@ static void UnscrollInitializeRuntimeFix(void)
                 (IMP)UnscrollAccessGroup);
         }
 
-        UnscrollReplaceMethod(
-            [NSFileManager class],
-            @selector(containerURLForSecurityApplicationGroupIdentifier:),
-            (IMP)UnscrollGroupContainer);
+        UnscrollOriginalGroupContainer =
+            (NSURL *(*)(id, SEL, NSString *))UnscrollReplaceMethod(
+                [NSFileManager class],
+                @selector(containerURLForSecurityApplicationGroupIdentifier:),
+                (IMP)UnscrollGroupContainer);
+
+        if (UnscrollIsExtensionProcess()) {
+            return;
+        }
 
         UnscrollOriginalAppStoreReceiptURL =
             (NSURL *(*)(id, SEL))UnscrollReplaceMethod(
@@ -196,5 +304,12 @@ static void UnscrollInitializeRuntimeFix(void)
                 objc_getClass("IGMainFeedListAdapterDataSource"),
                 @selector(objectsForListAdapter:),
                 (IMP)UnscrollFilterHomeFeedObjects);
+
+        UnscrollOriginalOpenURL =
+            (BOOL (*)(id, SEL, UIApplication *, NSURL *, NSDictionary *))
+                UnscrollReplaceMethod(
+                    objc_getClass("IGAppCoordinator"),
+                    @selector(application:openURL:options:),
+                    (IMP)UnscrollOpenURL);
     }
 }
